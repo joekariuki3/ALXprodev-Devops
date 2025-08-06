@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-# This script extracts specific fields from a JSON file using jq and prints the results.
+# This script extracts data from a JSON file and formats it for output.
 
 JSON_FILE="data.json"
 
@@ -15,4 +15,7 @@ formatted_height=$(jq -r '.height' "$JSON_FILE")
 formatted_weight=$(jq -r '.weight' "$JSON_FILE")
 type=$(jq -r '.types[0].type.name' "$JSON_FILE")
 
-echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall."
+# Print the extracted information using awk for formatting
+echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall." | awk -F' ' '{printf "%s is of type %s, weighs %.2fkg, and is %.2fm tall.\n", $1, $5, $7, $10}'
+
+
