@@ -1,0 +1,18 @@
+#!/usr/bin/bash
+
+# This script extracts specific fields from a JSON file using jq and prints the results.
+
+JSON_FILE="data.json"
+
+# Check if the JSON file exists
+if [ ! -f "$JSON_FILE" ]; then
+    echo "JSON file not found: $JSON_FILE"
+    exit 1
+fi
+
+name=$(jq -r '.name' "$JSON_FILE")
+formatted_height=$(jq -r '.height' "$JSON_FILE")
+formatted_weight=$(jq -r '.weight' "$JSON_FILE")
+type=$(jq -r '.types[0].type.name' "$JSON_FILE")
+
+echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall."
