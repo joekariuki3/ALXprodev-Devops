@@ -1,19 +1,35 @@
 #!/usr/bin/bash
 
-# This script extracts data from a JSON file and formats it for output.
-
+# This script extracts Pokémon data from a JSON file and formats it for output
 JSON_FILE="data.json"
 
-# Check if the JSON file exists
-if [ ! -f "$JSON_FILE" ]; then
-    echo "JSON file not found: $JSON_FILE"
+# Check if required commands are available
+for cmd in jq awk sed; do
+    if ! command -v $cmd &> /dev/null; then
+        echo "Error: $cmd is required but not installed."
+        exit 1
+    fi
+done
+
+# Check if the JSON file exists and is readable
+if [ ! -f "$JSON_FILE" ] || [ ! -r "$JSON_FILE" ]; then
+    echo "Error: JSON file not found or not readable: $JSON_FILE"
     exit 1
 fi
 
-name=$(jq -r '.name' "$JSON_FILE")
-formatted_height=$(jq -r '.height' "$JSON_FILE")
-formatted_weight=$(jq -r '.weight' "$JSON_FILE")
-type=$(jq -r '.types[0].type.name' "$JSON_FILE")
+# Extract and process data
+name=$(jq -r '.name' "$JSON_FILE" | sed 's/.*/\u&/')
+type=$(jq -r '.types[0].type.name' "$JSON_FILE" | sed 's/.*/\u&/')
 
-# Print the extracted information using awk for formatting
-echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall." | awk -F' ' '{printf "%s is of type %s, weighs %.2fkg, and is %.2fm tall.\n", $1, $5, $7, $10}'
+# Use awk to format the numbers with one decimal place
+formatted_height=$(jq -r '.height / 10' "$JSON_FILE" | awk '{printf "%.1f", $1}')
+formatted_weight=$(jq -r '.weight / 10' "$JSON_FILE" | awk '{printf "%.1f", $1}')
+
+# Check if any of the required fields are missing
+if [ -z "$name" ] || [ -z "$formatted_height" ] || [ -z "$formatted_weight" ] || [ -z "$type" ]; then
+    echo "Error: Required data missing from JSON file"
+    exit 1
+fi
+
+# Simple echo statement for final output
+echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall."
