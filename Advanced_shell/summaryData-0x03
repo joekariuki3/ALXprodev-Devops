@@ -24,7 +24,7 @@ generate_csv_report() {
     for json_file in "$INPUT_DIR"/*.json; do
         if [ -f "$json_file" ]; then
             # Extract data using
-            name=$(jq -r '.name' "$json_file" | awk '{print toupper(substr($0,1,1))substr($0,2)}')
+            name=$(jq -r '.name' "$JSON_FILE" | sed 's/.*/\u&/')
             height_dm=$(jq -r '.height' "$json_file")
             weight_hg=$(jq -r '.weight' "$json_file")
 
