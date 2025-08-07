@@ -7,8 +7,7 @@ readonly API_HEADER="Accept: application/json"
 readonly MAX_RETRIES=3
 readonly RETRY_DELAY=2
 readonly ERROR_LOG="pokemon_errors.log"
-readonly MAX_PARALLEL_PROCESSES=3
-readonly PROCESS_TIMEOUT=30
+readonly MAX_PARALLEL_JOBS=3
 
 # List of Pokemon to fetch
 readonly POKEMON_LIST=(
@@ -19,15 +18,16 @@ readonly POKEMON_LIST=(
     "charmeleon"
 )
 
-# Create a temporary directory for process tracking
-readonly TEMP_DIR=$(mktemp -d)
-trap 'rm -rf "${TEMP_DIR}"' EXIT  # Clean up temp directory on script exit
-
 # Function to log errors
 log_error() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[${timestamp}] $1" >> "$ERROR_LOG"
     echo "ERROR: $1" >&2
+}
+
+# Function to count active jobs
+count_jobs() {
+    jobs -p | wc -l
 }
 
 # Function to validate Pokemon name
@@ -45,14 +45,16 @@ fetch_pokemon_data() {
     local output_file="$OUTPUT_DIR/${pokemon_name}.json"
     local api_url="$API_BASE_URL/${pokemon_name}"
     local retry_count=0
-    local process_file="${TEMP_DIR}/${pokemon_name}.pid"
+    local status_file="${OUTPUT_DIR}/.${pokemon_name}.status"
 
     # Validate Pokemon name
     if ! validate_pokemon_name "$pokemon_name"; then
         log_error "Invalid Pokemon name format: ${pokemon_name}"
+        echo "failed" > "$status_file"
         return 1
     fi
 
+    echo "Fetching data for ${pokemon_name}..."
     while [ $retry_count -lt $MAX_RETRIES ]; do
         if curl -X GET "$api_url" \
             -H "$API_HEADER" \
@@ -61,9 +63,10 @@ fetch_pokemon_data() {
             --silent \
             --show-error \
             --connect-timeout 10 \
-            --max-time 30 2>"${TEMP_DIR}/${pokemon_name}.error"; then
+            --max-time 30 2>/dev/null; then
 
             if [ -s "$output_file" ]; then
+                echo "success" > "$status_file"
                 echo "Successfully fetched ${pokemon_name}"
                 return 0
             else
@@ -71,81 +74,74 @@ fetch_pokemon_data() {
             fi
         fi
 
-        local error_msg=$(cat "${TEMP_DIR}/${pokemon_name}.error")
-        log_error "Attempt $((retry_count + 1))/$MAX_RETRIES failed for ${pokemon_name}: $error_msg"
-
-        if echo "$error_msg" | grep -q "404"; then
-            break  # if 404 dont retry
-        fi
-
         retry_count=$((retry_count + 1))
-        [ $retry_count -lt $MAX_RETRIES ] && sleep $RETRY_DELAY
+
+        if [ $retry_count -lt $MAX_RETRIES ]; then
+            sleep $RETRY_DELAY
+        fi
     done
 
+    echo "failed" > "$status_file"
+    log_error "Failed to fetch ${pokemon_name} after ${MAX_RETRIES} attempts"
     return 1
 }
 
-# Function to manage parallel processes
-fetch_all_pokemon() {
-    local active_processes=0
-    local completed=0
-    declare -A pid_map
-
-    # Create output directory and initialize error log
+# Function to process all Pokemon in parallel
+process_pokemon_parallel() {
     mkdir -p "$OUTPUT_DIR"
     echo "=== Pokemon API Error Log ($(date '+%Y-%m-%d %H:%M:%S')) ===" > "$ERROR_LOG"
 
+    local completed=0
+    local success_count=0
+    local fail_count=0
+
     echo "Starting parallel Pokemon data fetching..."
 
-    # Process all Pokemon in parallel with limited concurrency
+    # Process Pokemon in parallel with job control
     for pokemon in "${POKEMON_LIST[@]}"; do
-        # Wait if we've reached max parallel processes
-        while [ $active_processes -ge $MAX_PARALLEL_PROCESSES ]; do
-            for pid in "${!pid_map[@]}"; do
-                if ! kill -0 $pid 2>/dev/null; then
-                    wait $pid
-                    local status=$?
-                    local pokemon_name=${pid_map[$pid]}
-
-                    if [ $status -eq 0 ]; then
-                        echo "✓ Completed: ${pokemon_name}"
-                    else
-                        echo "✗ Failed: ${pokemon_name}"
-                    fi
-
-                    unset pid_map[$pid]
-                    ((active_processes--))
-                    ((completed++))
-                fi
-            done
-            sleep 0.1
+        # Wait if we've reached max parallel jobs
+        while [ "$(count_jobs)" -ge "$MAX_PARALLEL_JOBS" ]; do
+            wait -n
         done
 
-        # Start new process
-        (fetch_pokemon_data "$pokemon") &
-        local pid=$!
-        pid_map[$pid]=$pokemon
-        ((active_processes++))
-
-        echo "Started fetching $pokemon (PID: $pid)"
+        # Start new job
+        fetch_pokemon_data "$pokemon" &
+        echo "Started job for ${pokemon}"
     done
 
-    # Wait for remaining processes to complete
-    echo "Waiting for remaining processes to complete..."
-    for pid in "${!pid_map[@]}"; do
-        if wait $pid; then
-            echo "✓ Completed: ${pid_map[$pid]}"
+    # Wait for all remaining jobs to complete
+    echo "Waiting for remaining jobs to complete..."
+    wait
+
+    # Check results
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        local status_file="${OUTPUT_DIR}/.${pokemon}.status"
+        if [ -f "$status_file" ]; then
+            if [ "$(cat "$status_file")" = "success" ]; then
+                echo "✓ ${pokemon}: Success"
+                ((success_count++))
+            else
+                echo "✗ ${pokemon}: Failed"
+                ((fail_count++))
+            fi
+            rm -f "$status_file"
         else
-            echo "✗ Failed: ${pid_map[$pid]}"
+            echo "? ${pokemon}: Status unknown"
+            ((fail_count++))
         fi
-        ((completed++))
     done
 
-    echo "All processes completed. Processed $completed Pokemon."
+    echo
+    echo "Summary:"
+    echo "--------"
+    echo "Total Pokemon processed: ${#POKEMON_LIST[@]}"
+    echo "Successful: ${success_count}"
+    echo "Failed: ${fail_count}"
 }
 
 # Main execution
-fetch_all_pokemon
+process_pokemon_parallel
 
-# Display summary
+# Display final message
+echo
 echo "Processing complete. Check $ERROR_LOG for any errors."
