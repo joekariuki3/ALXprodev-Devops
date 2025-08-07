@@ -1,0 +1,151 @@
+#!/usr/bin/bash
+
+# Configuration constants
+readonly API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+readonly OUTPUT_DIR="pokemon_data"
+readonly API_HEADER="Accept: application/json"
+readonly MAX_RETRIES=3
+readonly RETRY_DELAY=2
+readonly ERROR_LOG="pokemon_errors.log"
+readonly MAX_PARALLEL_PROCESSES=3
+readonly PROCESS_TIMEOUT=30
+
+# List of Pokemon to fetch
+readonly POKEMON_LIST=(
+    "bulbasaur"
+    "ivysaur"
+    "venusaur"
+    "charmander"
+    "charmeleon"
+)
+
+# Create a temporary directory for process tracking
+readonly TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "${TEMP_DIR}"' EXIT  # Clean up temp directory on script exit
+
+# Function to log errors
+log_error() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[${timestamp}] $1" >> "$ERROR_LOG"
+    echo "ERROR: $1" >&2
+}
+
+# Function to validate Pokemon name
+validate_pokemon_name() {
+    local pokemon_name="$1"
+    if [[ ! "$pokemon_name" =~ ^[a-zA-Z0-9-]+$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to fetch a single Pokemon's data
+fetch_pokemon_data() {
+    local pokemon_name="$1"
+    local output_file="$OUTPUT_DIR/${pokemon_name}.json"
+    local api_url="$API_BASE_URL/${pokemon_name}"
+    local retry_count=0
+    local process_file="${TEMP_DIR}/${pokemon_name}.pid"
+
+    # Validate Pokemon name
+    if ! validate_pokemon_name "$pokemon_name"; then
+        log_error "Invalid Pokemon name format: ${pokemon_name}"
+        return 1
+    fi
+
+    while [ $retry_count -lt $MAX_RETRIES ]; do
+        if curl -X GET "$api_url" \
+            -H "$API_HEADER" \
+            -o "$output_file" \
+            --fail \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 2>"${TEMP_DIR}/${pokemon_name}.error"; then
+
+            if [ -s "$output_file" ]; then
+                echo "Successfully fetched ${pokemon_name}"
+                return 0
+            else
+                rm -f "$output_file"
+            fi
+        fi
+
+        local error_msg=$(cat "${TEMP_DIR}/${pokemon_name}.error")
+        log_error "Attempt $((retry_count + 1))/$MAX_RETRIES failed for ${pokemon_name}: $error_msg"
+
+        if echo "$error_msg" | grep -q "404"; then
+            break  # if 404 dont retry
+        fi
+
+        retry_count=$((retry_count + 1))
+        [ $retry_count -lt $MAX_RETRIES ] && sleep $RETRY_DELAY
+    done
+
+    return 1
+}
+
+# Function to manage parallel processes
+fetch_all_pokemon() {
+    local active_processes=0
+    local completed=0
+    declare -A pid_map
+
+    # Create output directory and initialize error log
+    mkdir -p "$OUTPUT_DIR"
+    echo "=== Pokemon API Error Log ($(date '+%Y-%m-%d %H:%M:%S')) ===" > "$ERROR_LOG"
+
+    echo "Starting parallel Pokemon data fetching..."
+
+    # Process all Pokemon in parallel with limited concurrency
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        # Wait if we've reached max parallel processes
+        while [ $active_processes -ge $MAX_PARALLEL_PROCESSES ]; do
+            for pid in "${!pid_map[@]}"; do
+                if ! kill -0 $pid 2>/dev/null; then
+                    wait $pid
+                    local status=$?
+                    local pokemon_name=${pid_map[$pid]}
+
+                    if [ $status -eq 0 ]; then
+                        echo "✓ Completed: ${pokemon_name}"
+                    else
+                        echo "✗ Failed: ${pokemon_name}"
+                    fi
+
+                    unset pid_map[$pid]
+                    ((active_processes--))
+                    ((completed++))
+                fi
+            done
+            sleep 0.1
+        done
+
+        # Start new process
+        (fetch_pokemon_data "$pokemon") &
+        local pid=$!
+        pid_map[$pid]=$pokemon
+        ((active_processes++))
+
+        echo "Started fetching $pokemon (PID: $pid)"
+    done
+
+    # Wait for remaining processes to complete
+    echo "Waiting for remaining processes to complete..."
+    for pid in "${!pid_map[@]}"; do
+        if wait $pid; then
+            echo "✓ Completed: ${pid_map[$pid]}"
+        else
+            echo "✗ Failed: ${pid_map[$pid]}"
+        fi
+        ((completed++))
+    done
+
+    echo "All processes completed. Processed $completed Pokemon."
+}
+
+# Main execution
+fetch_all_pokemon
+
+# Display summary
+echo "Processing complete. Check $ERROR_LOG for any errors."
