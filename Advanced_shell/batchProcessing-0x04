@@ -30,6 +30,17 @@ count_jobs() {
     jobs -p | wc -l
 }
 
+terminate_job() {
+    local job_pid="$1"
+    if [ -n "$job_pid" ]; then
+        if jobs -p | grep -q "$job_pid"; then
+            kill "$job_pid" 2>/dev/null || true
+            wait "$job_pid" 2>/dev/null || true
+        fi
+    fi
+}
+
+
 # Function to validate Pokemon name
 validate_pokemon_name() {
     local pokemon_name="$1"
@@ -94,6 +105,8 @@ process_pokemon_parallel() {
     local completed=0
     local success_count=0
     local fail_count=0
+
+    trap 'for pid in $(jobs -p); do terminate_job "$pid"; done' EXIT
 
     echo "Starting parallel Pokemon data fetching..."
 
