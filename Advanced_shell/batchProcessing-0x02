@@ -5,6 +5,9 @@ readonly API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
 readonly OUTPUT_DIR="pokemon_data"
 readonly REQUEST_DELAY=5
 readonly API_HEADER="Accept: application/json"
+readonly MAX_RETRIES=3
+readonly RETRY_DELAY=2
+readonly ERROR_LOG="pokemon_errors.log"
 
 # List of Pokemon to fetch
 readonly POKEMON_LIST=(
@@ -15,25 +18,88 @@ readonly POKEMON_LIST=(
     "charmeleon"
 )
 
-# Function to fetch Pokemon data
+# Function to log errors
+log_error() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[${timestamp}] $1" >> "$ERROR_LOG"
+    echo "ERROR: $1"
+}
+
+# Function to validate Pokemon name
+validate_pokemon_name() {
+    local pokemon_name="$1"
+    if [[ ! "$pokemon_name" =~ ^[a-zA-Z0-9-]+$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to fetch Pokemon data with retries
 fetch_pokemon_data() {
     local pokemon_name="$1"
     local output_file="$OUTPUT_DIR/${pokemon_name}.json"
     local api_url="$API_BASE_URL/${pokemon_name}"
+    local retry_count=0
 
-    echo "Fetching data for ${pokemon_name}..."
-    
-    if ! curl -X GET "$api_url" -H "$API_HEADER" -o "$output_file" --fail --silent --show-error; then
-        echo "Error: Failed to fetch data for ${pokemon_name}"
+    # Validate Pokemon name
+    if ! validate_pokemon_name "$pokemon_name"; then
+        log_error "Invalid Pokemon name format: ${pokemon_name}"
         return 1
     fi
-    
-    echo "Successfully saved ${pokemon_name} data to ${output_file}"
-    return 0
+
+    echo "Fetching data for ${pokemon_name}..."
+
+    while [ $retry_count -lt $MAX_RETRIES ]; do
+        # Attempt to fetch data
+        if curl -X GET "$api_url" \
+            -H "$API_HEADER" \
+            -o "$output_file" \
+            --fail \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 2>/tmp/curl_error; then
+
+            # Verify the output file exists and is not empty
+            if [ -s "$output_file" ]; then
+                echo "Successfully saved ${pokemon_name} data to ${output_file}"
+                return 0
+            else
+                rm -f "$output_file"  # Remove empty file
+                log_error "Empty response received for ${pokemon_name}"
+            fi
+        else
+            local error_msg=$(cat /tmp/curl_error)
+            log_error "Attempt $((retry_count + 1))/$MAX_RETRIES failed for ${pokemon_name}: $error_msg"
+
+            # Check for specific error conditions
+            if echo "$error_msg" | grep -q "Could not resolve host"; then
+                log_error "Network connectivity issue detected"
+            elif echo "$error_msg" | grep -q "404"; then
+                log_error "Pokemon ${pokemon_name} not found (404 error) no more retries."
+                break # if 404 dont retry
+            fi
+        fi
+
+        retry_count=$((retry_count + 1))
+
+        if [ $retry_count -lt $MAX_RETRIES ]; then
+            echo "Retrying in ${RETRY_DELAY} seconds..."
+            sleep $RETRY_DELAY
+        fi
+    done
+
+    if [ $retry_count -eq $MAX_RETRIES ]; then
+        log_error "Max retries reached for ${pokemon_name}. Skipping."
+    fi
+    return 1
 }
 
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
+
+# Initialize error log
+echo "=== Pokemon API Error Log ($(date '+%Y-%m-%d %H:%M:%S')) ===" > "$ERROR_LOG"
 
 # Process each Pokemon in the list
 for pokemon in "${POKEMON_LIST[@]}"; do
